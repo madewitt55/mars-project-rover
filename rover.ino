@@ -21,7 +21,7 @@
 #include "DW1000Ranging.h" // MakerFabs DW1000 UWB chip ranging library, imported as ZIP
 #include "Logger.h" // Local logging helper class
 
-Logger Log(); // Initialize logger on default serial
+Logger log; // Initialize logger on default serial
 
 //---------- Bluetooth ----------
 BluetoothSerial SerialBT;
@@ -57,14 +57,15 @@ bool uwb_connected = false; // Beacon DW1000 UWB chip connected
  * @param plain_text_mac MAC address string, formatted as six colon-separated hex byte pairs (e.g. "AA:BB:CC:DD:EE:FF")
  * @param raw_mac Raw 6-byte MAC address to compare against
  *
- * @return `true` if the parsed address matches `mac`, false otherwise
+ * @return `true` if the parsed address matches `raw_mac`, false otherwise
 */
 bool compareMac(const char* plain_text_mac, const uint8_t raw_mac[6]) {
-    // Parse plain_text_mac into a raw MAC
+    // Parse plain text MAC into raw 6-byte MAC
     uint8_t parsed_mac[6];
-    sscanf(plain_text_mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-           &parsed_mac[0], &parsed_mac[1], &parsed_mac[2],
-           &parsed_mac[3], &parsed_mac[4], &parsed_mac[5]);
+    int parsed = sscanf(plain_text_mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                        &parsed_mac[0], &parsed_mac[1], &parsed_mac[2],
+                        &parsed_mac[3], &parsed_mac[4], &parsed_mac[5]);
+    if (parsed != 6) return false; // Invalid MAC string structure, cannot match
 
     // Compare MACs
     for (uint8_t i = 0; i < 6; ++i) {
@@ -94,14 +95,14 @@ void newRangeCallback() {
  * @param device New device to be activated
 */
 void newDeviceCallback(DW1000Device *device) {
-    Log.info("New UWB device detected");
+    log.info("New UWB device detected");
     if (device->getShortAddress() != BEACON_SHORT_ADDRESS) {
-        Log.warn("New UWB device not recognized as BEACON, rejecting connection");
+        log.warn("New UWB device not recognized as BEACON, rejecting connection");
         return;
     }
 
     // Beacon activated
-    Log.info("New UWB device recognized as BEACON");
+    log.info("New UWB device recognized as BEACON");
     uwb_connected = true;
 }
 
@@ -114,33 +115,32 @@ void newDeviceCallback(DW1000Device *device) {
 */
 void inactiveDeviceCallback(DW1000Device *device) {
     if (device->getShortAddress() != BEACON_SHORT_ADDRESS) {
-        Log.info("Unrecognized UWB device disconnected");
+        log.info("Unrecognized UWB device disconnected");
         return;
     }
 
     // Beacon deactivated
     uwb_connected = false;
     for (uint8_t i = 0; i < NUM_RANGE_SAMPLES; ++i) range_buf[i] = 0; // Zero out range buffer
-    Log.error("BEACON disconnected from UWB");
+    log.error("BEACON disconnected from UWB");
 }
 
 /**
  * @brief Handles Bluetooth connection events, accepting only the recognized BEACON device
  *
- * @note Registered as the callback for the Bluetooth SPP stack. On a new connection, the device is
-         rejected unless no beacon is already connected and its MAC address matches `BEACON_BT_MAC`.
-         On disconnect, clears `bt_connected` if the beacon was the device that disconnected.
+ * @note Registered as the callback for the Bluetooth SPP stack. Only a single connection verified as
+         the beacon is accepted.
  *
  * @param event Type of Bluetooth event that occurred (e.g. device connected, device disconnected)
  * @param param Event-specific data, contains the remote device's raw MAC address on a connection event
 */
 void bluetoothCallback(esp_spp_cb_event_t event, esp_spp_cb_param_t* param) {
     if (event == ESP_SPP_SRV_OPEN_EVT) {
-        Log.info("New BT device connected");
+        log.info("New BT device connected");
 
         // Beacon already connected, reject connection
         if (bt_connected) {
-            Log.info("BEACON already connected via BT, rejecting new connection");
+            log.info("BEACON already connected via BT, rejecting new connection");
             SerialBT.disconnect();
             return;
         }
@@ -150,17 +150,17 @@ void bluetoothCallback(esp_spp_cb_event_t event, esp_spp_cb_param_t* param) {
 
         // Beacon recognized
         if (match) {
-            Log.info("New BT device recognized as BEACON");
+            log.info("New BT device recognized as BEACON");
             bt_connected = true;
         }
         // Unknown device recognized, reject connection
         else {
-            Log.warn("New BT device not recognized, rejecting connection");
+            log.warn("New BT device not recognized, rejecting connection");
             SerialBT.disconnect();
         }
     } else if (event == ESP_SPP_CLOSE_EVT) {
         if (bt_connected) {
-            Log.error("BEACON disconnected from BT");
+            log.error("BEACON disconnected from BT");
             bt_connected = false;
         }
     }
