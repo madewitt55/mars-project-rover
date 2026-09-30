@@ -21,11 +21,11 @@
 #include "DW1000Ranging.h" // MakerFabs DW1000 UWB chip ranging library, imported as ZIP
 #include "Logger.h" // Local logging helper class
 
-Logger log; // Initialize logger on default serial
+Logger logger; // Initialize logger on default serial
 
 //---------- Bluetooth ----------
 BluetoothSerial SerialBT;
-bool bt_connected = false;
+volatile bool bt_connected = false;
 #define ROVER_BT_NAME "ROVER"
 #define ROVER_BT_MAC "64:B7:08:66:8D:56"
 #define BEACON_BT_MAC "B0:A7:32:1B:93:62"
@@ -46,7 +46,7 @@ const bool USE_RANGE_FILTER = true; // UWB range-smoothing filter
 const uint8_t NUM_RANGE_SAMPLES = 5; // Number of range samples to be recorded and averaged
 float range_buf[NUM_RANGE_SAMPLES] = {0}; // Buffer to store range values for averaging, all zeroes by default
 uint8_t range_buf_idx = 0; // Buffer index
-bool uwb_connected = false; // Beacon DW1000 UWB chip connected
+volatile bool uwb_connected = false; // Beacon DW1000 UWB chip connected
 
 /**
  * @brief Helper function for comparing a plain text colon-separated MAC address with a raw MAC address
@@ -95,14 +95,14 @@ void newRangeCallback() {
  * @param device New device to be activated
 */
 void newDeviceCallback(DW1000Device *device) {
-    log.info("New UWB device detected");
+    logger.info("New UWB device detected");
     if (device->getShortAddress() != BEACON_SHORT_ADDRESS) {
-        log.warn("New UWB device not recognized as BEACON, rejecting connection");
+        logger.warn("New UWB device not recognized as BEACON, rejecting connection");
         return;
     }
 
     // Beacon activated
-    log.info("New UWB device recognized as BEACON");
+    logger.info("New UWB device recognized as BEACON");
     uwb_connected = true;
 }
 
@@ -115,14 +115,14 @@ void newDeviceCallback(DW1000Device *device) {
 */
 void inactiveDeviceCallback(DW1000Device *device) {
     if (device->getShortAddress() != BEACON_SHORT_ADDRESS) {
-        log.info("Unrecognized UWB device disconnected");
+        logger.info("Unrecognized UWB device disconnected");
         return;
     }
 
     // Beacon deactivated
     uwb_connected = false;
     for (uint8_t i = 0; i < NUM_RANGE_SAMPLES; ++i) range_buf[i] = 0; // Zero out range buffer
-    log.error("BEACON disconnected from UWB");
+    logger.error("BEACON disconnected from UWB");
 }
 
 /**
@@ -136,11 +136,11 @@ void inactiveDeviceCallback(DW1000Device *device) {
 */
 void bluetoothCallback(esp_spp_cb_event_t event, esp_spp_cb_param_t* param) {
     if (event == ESP_SPP_SRV_OPEN_EVT) {
-        log.info("New BT device connected");
+        logger.info("New BT device connected");
 
         // Beacon already connected, reject connection
         if (bt_connected) {
-            log.info("BEACON already connected via BT, rejecting new connection");
+            logger.info("BEACON already connected via BT, rejecting new connection");
             SerialBT.disconnect();
             return;
         }
@@ -150,17 +150,17 @@ void bluetoothCallback(esp_spp_cb_event_t event, esp_spp_cb_param_t* param) {
 
         // Beacon recognized
         if (match) {
-            log.info("New BT device recognized as BEACON");
+            logger.info("New BT device recognized as BEACON");
             bt_connected = true;
         }
         // Unknown device recognized, reject connection
         else {
-            log.warn("New BT device not recognized, rejecting connection");
+            logger.warn("New BT device not recognized, rejecting connection");
             SerialBT.disconnect();
         }
     } else if (event == ESP_SPP_CLOSE_EVT) {
         if (bt_connected) {
-            log.error("BEACON disconnected from BT");
+            logger.error("BEACON disconnected from BT");
             bt_connected = false;
         }
     }
