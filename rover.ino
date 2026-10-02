@@ -44,7 +44,7 @@ const bool USE_RANGE_FILTER = true; // UWB range-smoothing filter
 #define BEACON_HARDWARE_ADDRESS "86:17:5B:D5:A9:9A:E2:9C" // Hardware address of beacon DW1000 UWB chip
 #define BEACON_SHORT_ADDRESS 0x1786                        // Short address of beacon, derived from first two bytes of BEACON_HARDWARE_ADDRESS
 const uint8_t NUM_RANGE_SAMPLES = 5; // Number of range samples to be recorded and averaged
-float range_buf[NUM_RANGE_SAMPLES] = {0}; // Buffer to store range values for averaging, all zeroes by default
+float range_buf[NUM_RANGE_SAMPLES] = {0}; // Buffer to store range values for averaging, all zeroes by default or after beacon disconnect
 uint8_t range_buf_idx = 0; // Buffer index
 volatile bool uwb_connected = false; // Beacon DW1000 UWB chip connected
 
@@ -195,9 +195,18 @@ void loop() {
  * @note Averages the last `NUM_RANGE_SAMPLES` range readings from the range buffer
  *
  * @return Distance between rover and beacon if beacon is detected, `NAN` if beacon is not detected
+           or range buffer is not full
  */
 float getBeaconDistance() {
-    if (!uwb_connected) return NAN; // Beacon not detected, range buffer inaccurate
+    bool range_buf_full = true;
+    for (uint8_t i = 0; i < sizeof(range_buf) / sizeof(range_buf[0]); ++i) {
+        // Range buffer contains a 0, not full
+        if (range_buf[i] == 0) {
+            range_buf_full = false;
+            break;
+        }
+    }
+    if (!uwb_connected || !range_buf_full) return NAN; // Range buffer inaccurate
 
     // Calculate average of range buffer
     float avg = 0;
