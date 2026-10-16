@@ -16,17 +16,9 @@
  */
 
 #include <SPI.h> // Enables Serial Peripheral Interface communication
-#include <BluetoothSerial.h> // Enables classic Bluetooth Serial Port Profile communication
-#include "esp_spp_api.h" // Allows registration of Serial Port Profile Bluetooth callbacks
 #include "DW1000Ranging.h" // MakerFabs DW1000 UWB chip ranging library, imported as ZIP
 #include "Logger.h" // Local logging helper class
-
-//---------- Onboard Trace Bluetooth Antenna ----------
-BluetoothSerial SerialBT;
-volatile bool bt_connected = false;
-#define ROVER_BT_NAME "ROVER"
-#define ROVER_BT_MAC "64:B7:08:66:8D:56"
-#define BEACON_BT_MAC "B0:A7:32:1B:93:62"
+#include "Bluetooth.h" // Local Bluetooth SPP connection and command helpers
 
 //---------- DW1000 Ultra-wideband Radio Module ----------
 // Controller: ESP32-D0WD-V3, Peripheral: DW1000
@@ -58,35 +50,11 @@ volatile bool uwb_connected = false; // Beacon DW1000 UWB chip connected
 #define ENA 32 // Enable A (left motor), PWM output value determines speed of motor
 #define ENB 33 // Enable B (right motor), PWM output value determines speed of motor
 
+enum MotorDirection { FORWARD, BACKWARD, STOP };
+
 // Initialize logger on default serial
 // Pass `SerialBT` to log to BEACON
 Logger Logger(Serial);
-
-/**
- * @brief Helper function for comparing a plain text colon-separated MAC address with a raw MAC address
- *
- * @note `plain_text_mac` is parsed into a raw 6-byte MAC address before comparison with `raw_mac`.
-          Used for comparing a hardcoded readable MAC to a raw MAC, such as the one returned from BluetoothSerial.
- *
- * @param plain_text_mac MAC address string, formatted as six colon-separated hex byte pairs (e.g. "AA:BB:CC:DD:EE:FF")
- * @param raw_mac Raw 6-byte MAC address to compare against
- *
- * @return `true` if the parsed address matches `raw_mac`, `false` otherwise
-*/
-bool compareMac(const char* plain_text_mac, const uint8_t raw_mac[6]) {
-    // Parse plain text MAC into raw 6-byte MAC
-    uint8_t parsed_mac[6];
-    int parsed = sscanf(plain_text_mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-                        &parsed_mac[0], &parsed_mac[1], &parsed_mac[2],
-                        &parsed_mac[3], &parsed_mac[4], &parsed_mac[5]);
-    if (parsed != 6) return false; // Invalid MAC string structure, cannot match
-
-    // Compare MACs
-    for (uint8_t i = 0; i < 6; ++i) {
-        if (parsed_mac[i] != raw_mac[i]) return false;
-    }
-    return true;
-}
 
 /**
  * @brief Records a new range reading between onboard DW1000 UWB chip and connected device
@@ -139,54 +107,11 @@ void inactiveDeviceCallback(DW1000Device *device) {
     Logger.error("BEACON disconnected from UWB");
 }
 
-/**
- * @brief Handles Bluetooth connection events, accepting only the recognized BEACON device
- *
- * @note Registered as the callback for the Bluetooth SPP stack. Only a single connection verified as
-         the beacon is accepted.
- *
- * @param event Type of Bluetooth event that occurred (e.g. device connected, device disconnected)
- * @param param Event-specific data, contains the remote device's raw MAC address on a connection event
-*/
-void bluetoothCallback(esp_spp_cb_event_t event, esp_spp_cb_param_t* param) {
-    if (event == ESP_SPP_SRV_OPEN_EVT) {
-        Logger.info("New BT device connected");
-
-        // Beacon already connected, reject connection
-        if (bt_connected) {
-            Logger.info("BEACON already connected via BT, rejecting new connection");
-            SerialBT.disconnect();
-            return;
-        }
-
-        uint8_t* bda = param->srv_open.rem_bda; // New device raw 6-byte MAC
-        bool match = compareMac(BEACON_BT_MAC, bda); // Compare new device MAC to beacon MAC
-
-        // Beacon recognized
-        if (match) {
-            Logger.info("New BT device recognized as BEACON");
-            bt_connected = true;
-        }
-        // Unknown device recognized, reject connection
-        else {
-            Logger.warn("New BT device not recognized, rejecting connection");
-            SerialBT.disconnect();
-        }
-    } else if (event == ESP_SPP_CLOSE_EVT) {
-        if (bt_connected) {
-            Logger.error("BEACON disconnected from BT");
-            bt_connected = false;
-        }
-    }
-}
-
 void setup() {
     Serial.begin(9600); // Baud rate 9600 Bd
     delay(3000); // Allow serial monitor time to open
 
-    // Bluetooth setup
-    SerialBT.register_callback(bluetoothCallback); // Callback function fires every time BT stack has an event
-    SerialBT.begin(ROVER_BT_NAME); // Bluetooth "server"; beacon connects to it
+    beginBluetooth(); // Registers the BT callback and listens for the beacon's connection
 
     // Ultra-wideband setup
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI); // Initialize SPI bus, hardwired to onboard DW1000 UWB chip
@@ -215,6 +140,21 @@ void setup() {
 
 void loop() {
     DW1000Ranging.loop(); // Ranging library's main state machine, must be called repeatedly
+
+    // if (bt_connected && SerialBT.available()) {
+    //     char cmd[BT_TOKEN_MAX_LEN];
+    //     readBluetoothCommand(cmd, sizeof(cmd));
+    //     Logger.debug(cmd);
+    // }
+    setLeftMotor(255, FORWARD);
+    setRightMotor(255, FORWARD);
+    delay(1000);
+    setLeftMotor(0, STOP);
+    setRightMotor(0, STOP);
+    delay(1000);
+    setLeftMotor(30, BACKWARD);
+    setRightMotor(30, BACKWARD);
+    delay(1000);
 }
 
 /**
@@ -245,71 +185,26 @@ float getBeaconDistance() {
 }
 
 /**
- * @brief Drives both motors forward at a given speed
+ * @brief Sets the PWM speed and direction of the left motor
  *
- * @note Speed is reduced to 100 if greater, then scaled from a 0-100 percentage to a 0-255 PWM value
- *
- * @param speed Motor speed as a percentage (0-100)
-*/
-void forward(uint8_t speed) {
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
-
-    // Convert speed percentage to PWM value
-    uint8_t pwm_value;
-    if (speed > 100) pwm_value = 255;
-    else pwm_value = static_cast<uint8_t>(static_cast<float>(speed) / 100.0f * 255.0f);
-
-    analogWrite(ENA, pwm_value);
-    analogWrite(ENB, pwm_value);
+ * @param pwm PWM duty cycle for the motor's speed (0-255), ignored when `direction` is `STOP`
+ * @param direction Direction for the motor to drive, `FORWARD`, `BACKWARD`, or `STOP`
+ */
+void setLeftMotor(uint8_t pwm, MotorDirection direction) {
+    digitalWrite(IN1, direction == FORWARD ? HIGH : LOW);
+    digitalWrite(IN2, direction == BACKWARD ? HIGH : LOW);
+    analogWrite(ENA, direction == STOP ? 0 : pwm);
 }
 
 /**
- * @brief Drives both motors backward at a given speed
+ * @brief Sets the PWM speed and direction of the right motor
  *
- * @note Speed is reduced to 100 if greater, then scaled from a 0-100 percentage to a 0-255 PWM value
- *
- * @param speed Motor speed as a percentage (0-100)
-*/
-void backward(uint8_t speed) {
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, LOW);
-    digitalWrite(IN4, HIGH);
-
-    // Convert speed percentage to PWM value
-    uint8_t pwm_value;
-    if (speed > 100) pwm_value = 255;
-    else pwm_value = static_cast<uint8_t>(static_cast<float>(speed) / 100.0f * 255.0f);
-
-    analogWrite(ENA, pwm_value);
-    analogWrite(ENB, pwm_value);
+ * @param pwm PWM duty cycle for the motor's speed (0-255), ignored when `direction` is `STOP`
+ * @param direction Direction for the motor to drive, `FORWARD`, `BACKWARD`, or `STOP`
+ */
+void setRightMotor(uint8_t pwm, MotorDirection direction) {
+    digitalWrite(IN3, direction == FORWARD ? HIGH : LOW);
+    digitalWrite(IN4, direction == BACKWARD ? HIGH : LOW);
+    analogWrite(ENB, direction == STOP ? 0 : pwm);
 }
 
-/**
- * @brief Stops both motors, optionally applying active braking
- *
- * @note Drives IN1/IN2 and IN3/IN4 LOW so each pair is matched; with brake_force at 0 (default),
-         PWM speed is also set to 0, disabling the H-Bridge output stage and letting the motors coast
-         to a stop. A nonzero brake_force instead drives PWM speed, shorting each motor's leads to
-         actively brake it. brake_force is clamped to 100 if greater, then scaled from a 0-100
-         percentage to a 0-255 PWM value.
- *
- * @param brake_force Braking force as a percentage (0-100), 0 by default (coast stop)
-*/
-void stop(uint8_t brake_force = 0) {
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, LOW);
-    digitalWrite(IN4, LOW);
-
-    // Convert brake force percentage to PWM value
-    uint8_t pwm_value;
-    if (brake_force > 100) pwm_value = 255;
-    else pwm_value = static_cast<uint8_t>(static_cast<float>(brake_force) / 100.0f * 255.0f);
-
-    analogWrite(ENA, pwm_value);
-    analogWrite(ENB, pwm_value);
-}
